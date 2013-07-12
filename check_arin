@@ -1,0 +1,166 @@
+#!/usr/bin/python26
+# -*- coding: iso-8859-15 -*-
+# Nagios plugin for checking a domain name expiration date
+#
+# Copyright (c) 2013 Andrew Teixeira <teixeira@broadinstitute.org>
+# Derived from original work by 
+# * Tomàs Núñez Lirola <tnunez@criptos.com>
+# * Elan Ruusamäe <glen@pld-linux.org>
+#
+# Licensed under GPL v3 License
+#
+
+from datetime import date, datetime, timedelta
+import getopt
+import os
+import re
+import sys
+import whois
+
+#. $PROGPATH/utils.sh
+VERSION = "1.0"
+
+def usage():
+    print "Usage: %s -h | -d <domain> [-c <critical>] [-w <warning>]" % os.path.basename(__file__)
+
+def fullusage():
+    u = [
+        "check_domain - v%s" % VERSION,
+        "Copyright (c) 2013 Andrew Teixeira",
+        "under GPL License\n",
+        "This plugin checks the expiration date of a domain name.\n",
+        "Usage: %s -h | -d <domain> [-c <critical>] [-w <warning>]" % os.path.basename(__file__),
+        "NOTE: -d must be specified\n",
+        "Options:",
+        "-h",
+        "     Print detailed help",
+        "-d",
+        "     Domain name to check",
+        "-w",
+        "     Response time to result in warning status (days)",
+        "-c",
+        "     Response time to result in critical status (days)\n",
+        "This plugin will use whois service to get the expiration date for the",
+        "domain name.\n",
+        "Example:",
+        "     %s -d domain.tld -w 30 -c 10" % os.path.basename(__file__)
+    ]
+
+    print "\n" . join(u)
+
+def getStates():
+    state = {}
+
+    # Get state values from the util.sh file
+    u = os.path.dirname(os.path.abspath(__file__))
+    util = os.path.join(u, "utils.sh")
+    if os.path.isfile(util):
+        f = open(util, "r")
+        for l in f:
+            if not l:
+                continue
+            elif re.search("^STATE_", l):
+                s = l.split("=")
+                sn = s[0].split("_")
+                state[sn[1]] = int(s[1].rstrip())
+            else:
+                continue
+    else:
+        print "Cannot open util.sh file...exiting!"
+        sys.exit(10)
+
+    return state
+
+def die(rc, msg):
+    print "%s" % msg
+    sys.exit(rc)
+
+def main():
+    # Parse arguments
+    shortargs = "hd:w:c:P:"
+    longargs = [ "help", "domain=", "warning=", "critical", "path=" ]
+
+    # Option values
+    o_help = [ "-h", "--help" ]
+    o_crit = [ "-c", "--critical" ]
+    o_warn = [ "-w", "--warning" ]
+    o_domain = [ "-d", "--domain" ]
+    o_path = [ "-P", "--path" ]
+
+    # Default values:
+    CRITICAL = 7
+    WARNING = 30
+    DOMAIN = None
+
+    # Get the Nagios states from the util.sh file
+    state = getStates()
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], shortargs, longargs)
+    except getopt.GetoptError as err:
+        # print help information and exit:
+        print str(err)
+        usage()
+        sys.exit(state["UNKNOWN"])
+
+    for o in opts:
+        if o[0] in o_help:
+            fullusage()
+            sys.exit(state["UNKNOWN"])
+        if o[0] in o_crit:
+            if is_int(o[1]):
+                CRITICAL = int(o[0])
+            else:
+                print "Invalid value for critical."
+                usage()
+                sys.exit(state["UNKNOWN"])
+        if o[0] in o_warn:
+            if is_int(o[1]):
+                WARNING = int(o[0])
+            else:
+                print "Invalid value for warning."
+                usage()
+                sys.exit(state["UNKNOWN"])
+        if o[0] in o_domain:
+            DOMAIN = o[1]
+
+    if not DOMAIN:
+        die(state["UNKNOWN"], "UNKNOWN - There is no domain name to check")
+
+    # Start looking up whois information
+    who = whois.whois(DOMAIN).query(False)
+
+    if not who[1]:
+        die(state["UNKNOWN"], "UNKNOWN - Domain %s doesn't exist or no WHOIS server available." % DOMAIN)
+
+    info = whois.Parser(DOMAIN, who[1]).parse()
+
+    if not "ExpirationDate" in info.keys():
+        die(state["UNKNOWN"], "UNKNOWN - Unable to figure out expiration date for %s Domain." % DOMAIN)
+
+    # Get today's timestamp
+    today = datetime.today()
+
+    # Convert expiration date found from whois
+    t = whois.convertDate(info["ExpirationDate"][0])
+    d = datetime.fromtimestamp(t)
+
+    # Figure out how many days are left for the domain
+    diff = d - today
+
+    # Trigger alarms if applicable
+    if diff.days < 0:
+        die(state["CRITICAL"], "CRITICAL - Domain %s expired on %s." % (DOMAIN, d.strftime("%Y-%m-%d")))
+    elif diff.days < CRITICAL:
+        die(state["CRITICAL"], "CRITICAL - Domain %s will expire in %s days (%s)." % (DOMAIN, diff.days, d.strftime("%Y-%m-%d")))
+    elif diff.days < WARNING:
+        die(state["WARNING"], "WARNING - Domain %s will expire in %s days (%s)." % (DOMAIN, diff.days, d.strftime("%Y-%m-%d")))
+
+    # No alarms? Ok, everything is right.
+    die(state["OK"], "OK - Domain %s will expire in %s days (%s)." % (DOMAIN, diff.days, d.strftime("%Y-%m-%d")))    
+
+# Standard boilerplate to call the main() function to begin the program.
+if __name__ == "__main__":
+    ret = main()
+
+sys.exit(ret)
